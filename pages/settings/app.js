@@ -16,47 +16,93 @@ function showToast(message, type = 'success') {
     setTimeout(() => toast.remove(), 2800);
 }
 
-// ✨ 图库渲染引擎核心修复
-async function renderGallery() {
+// ✨ 核心大修复：图库 DOM 只构建一次，点击选中只改样式不刷新页面，彻底消灭“白线”！
+async function buildGalleryDOM() {
     const container = document.getElementById('gallery-container');
     if(!container) return;
+    
+    // 清除旧内容
+    container.querySelectorAll('.gallery-item-wrapper').forEach(el => el.remove());
+    
+    const loadingText = document.getElementById('gallery-loading-text');
     if(state.gallery.length === 0) {
-        container.innerHTML = '<span style="color: var(--text-muted); font-size: 14px; padding: 20px;">暂无历史生图 (temp_images)，快去生成第一张照片吧！</span>';
+        if(loadingText) {
+            loadingText.style.display = 'block';
+            loadingText.innerText = '图库为空，快去生成第一张照片吧！';
+        }
         return;
+    } else {
+        if(loadingText) loadingText.style.display = 'none';
     }
     
-    container.innerHTML = state.gallery.map((filename, idx) => {
-        const isSelected = state.selected_gallery_files.has(filename);
-        // 💡 修复白线：给一个加载底色和最小尺寸，保证在图片加载出来前不会缩成线。加载后宽自适应，高受限，完美保持原比例！
-        return `
-        <div class="image-preview-wrapper gallery-item-wrapper" data-file="${filename}" style="position: relative; cursor: pointer; transition: transform 0.2s; border: ${isSelected ? '3px solid #006FEE' : '2px solid transparent'}; border-radius: 8px; overflow: hidden; display: inline-flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.05); min-width: 100px; min-height: 100px;">
-            <img src="" class="image-preview" style="display: block; opacity: ${isSelected ? '0.8' : '1'}; transition: all 0.2s; max-height: 200px; width: auto; object-fit: contain;" id="gallery-img-${idx}">
-            ${isSelected ? `<div style="position: absolute; top: 0; right: 0; width: 24px; height: 24px; background: #006FEE; color: #FFF; border-bottom-left-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: bold; z-index: 10;">✓</div>` : ''}
-        </div>
-        `;
-    }).join('');
+    // 💡 彻底复用人设图的原版布局逻辑 image-preview-wrapper
+    state.gallery.forEach((filename, idx) => {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'image-preview-wrapper gallery-item-wrapper';
+        wrapper.setAttribute('data-file', filename);
+        wrapper.style.cursor = 'pointer';
+        wrapper.style.transition = 'all 0.2s';
+        wrapper.style.border = '2px solid transparent';
+        wrapper.style.position = 'relative';
 
-    // ✨ 修复加载失败：放弃 GET 请求的 URL 拼接，直接用 POST 发送 JSON 载荷
+        wrapper.innerHTML = `<img src="" class="image-preview" id="gallery-img-${idx}" alt="加载中..." style="transition: all 0.2s;">`;
+        
+        container.appendChild(wrapper);
+    });
+
+    // 开始慢速懒加载图片 Base64，不再会被中断
     for(let idx = 0; idx < state.gallery.length; idx++) {
         const filename = state.gallery[idx];
         try {
             const imgEl = document.getElementById(`gallery-img-${idx}`);
             if(!imgEl) continue;
-            if(!imgEl.getAttribute('src')) {
-                 const res = await bridge.apiPost("get_gallery_image", { filename: filename });
-                 if(res && res.base64) imgEl.setAttribute('src', res.base64);
+            // 通过强力 POST 拿到数据
+            const res = await bridge.apiPost("get_gallery_image", { filename: filename });
+            if(res && res.base64) {
+                imgEl.setAttribute('src', res.base64);
             }
         } catch(e) {}
     }
 }
 
+// ✨ 只管样式的全选函数（无刷新）
+function toggleSelectAllGallery() {
+    const container = document.getElementById('gallery-container');
+    const allSelected = state.selected_gallery_files.size === state.gallery.length;
+    
+    if (allSelected) state.selected_gallery_files.clear();
+    else state.gallery.forEach(f => state.selected_gallery_files.add(f));
+    
+    container.querySelectorAll('.gallery-item-wrapper').forEach(wrapper => {
+        const filename = wrapper.getAttribute('data-file');
+        const isSelected = state.selected_gallery_files.has(filename);
+        if (isSelected) {
+            wrapper.style.border = '3px solid #006FEE';
+            wrapper.style.transform = 'scale(0.95)';
+            wrapper.querySelector('img').style.opacity = '0.7';
+            if (!wrapper.querySelector('.check-mark')) {
+                const check = document.createElement('div');
+                check.className = 'check-mark';
+                check.style.cssText = 'position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #006FEE; color: white; width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.3); z-index: 10; pointer-events: none;';
+                check.innerText = '✓';
+                wrapper.appendChild(check);
+            }
+        } else {
+            wrapper.style.border = '2px solid transparent';
+            wrapper.style.transform = 'scale(1)';
+            wrapper.querySelector('img').style.opacity = '1';
+            const check = wrapper.querySelector('.check-mark');
+            if(check) check.remove();
+        }
+    });
+}
+
 async function fetchGallery() {
     try {
-        // ✨ 改用 POST 获取列表
         const res = await bridge.apiPost("get_gallery_list", {});
         state.gallery = (res && Array.isArray(res.files)) ? res.files : [];
         state.selected_gallery_files.clear();
-        renderGallery();
+        buildGalleryDOM(); // 仅拉取时构建 DOM
     } catch(e) { showToast("读取图库失败", "error"); }
 }
 
@@ -330,6 +376,7 @@ function setupEventDelegation() {
             document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
             document.getElementById(navItem.getAttribute('data-target')).classList.add('active');
             
+            // 只有切换到图库时拉取一次最新数据
             if (navItem.getAttribute('data-target') === 'tab-gallery') fetchGallery();
             return;
         }
@@ -358,12 +405,28 @@ function setupEventDelegation() {
 
         if (e.target.closest('#persona-upload-trigger')) fileInput.click();
 
+        // ✨ 无刷新处理选中/取消选中
         const galleryItem = e.target.closest('.gallery-item-wrapper');
         if (galleryItem) {
             const filename = galleryItem.getAttribute('data-file');
-            if (state.selected_gallery_files.has(filename)) state.selected_gallery_files.delete(filename);
-            else state.selected_gallery_files.add(filename);
-            renderGallery();
+            if (state.selected_gallery_files.has(filename)) {
+                state.selected_gallery_files.delete(filename);
+                galleryItem.style.border = '2px solid transparent';
+                galleryItem.style.transform = 'scale(1)';
+                galleryItem.querySelector('img').style.opacity = '1';
+                const check = galleryItem.querySelector('.check-mark');
+                if (check) check.remove();
+            } else {
+                state.selected_gallery_files.add(filename);
+                galleryItem.style.border = '3px solid #006FEE';
+                galleryItem.style.transform = 'scale(0.95)';
+                galleryItem.querySelector('img').style.opacity = '0.7';
+                const check = document.createElement('div');
+                check.className = 'check-mark';
+                check.style.cssText = 'position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #006FEE; color: white; width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.3); z-index: 10; pointer-events: none;';
+                check.innerText = '✓';
+                galleryItem.appendChild(check);
+            }
             return;
         }
 
@@ -374,15 +437,14 @@ function setupEventDelegation() {
 
         if (act === 'save-config') saveConfig(btn);
         
+        // ✨ 全选 (无刷新渲染)
         if (act === 'gallery-select-all') {
-            const allSelected = state.selected_gallery_files.size === state.gallery.length;
-            if (allSelected) state.selected_gallery_files.clear();
-            else state.gallery.forEach(f => state.selected_gallery_files.add(f));
-            renderGallery();
+            toggleSelectAllGallery();
         }
         
+        // ✨ 终极暴力删除：强制解析发送
         if (act === 'gallery-delete-selected') {
-            if (state.selected_gallery_files.size === 0) return showToast("请先点击选中要删除的文件", "error");
+            if (state.selected_gallery_files.size === 0) return showToast("请先点击选中图片！", "error");
             if (!confirm(`确定要彻底物理删除这 ${state.selected_gallery_files.size} 张图片吗？该操作不可恢复！`)) return;
             
             btn.disabled = true;
@@ -392,12 +454,11 @@ function setupEventDelegation() {
                 const res = await bridge.apiPost("delete_gallery_images", payload);
                 if (res && res.success) {
                     showToast(`成功粉碎 ${res.count} 张图片！`);
-                    state.selected_gallery_files.clear();
-                    await fetchGallery();
+                    await fetchGallery(); // 重新构建图库
                 } else {
-                    showToast("删除请求未能完全执行", "error");
+                    showToast(res.message || "删除未能完全执行", "error");
                 }
-            } catch(err) { showToast("删除通讯异常", "error"); }
+            } catch(err) { showToast("删除网络异常", "error"); }
             btn.disabled = false;
             btn.innerHTML = "删除选中";
         }
