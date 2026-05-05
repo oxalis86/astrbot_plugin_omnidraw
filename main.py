@@ -774,6 +774,70 @@ class OmniDrawPlugin(Star):
 
         self._create_background_task(self.video_manager.background_task_runner(event, prompt, safe_refs, kwargs))
 
+    @llm_tool(name="generate_user_photo")
+    async def tool_generate_user_photo(
+        self,
+        event: AstrMessageEvent,
+        prompt: str,
+        count: int = 1,
+        aspect_ratio: str = "",
+        size: str = "",
+        extra_params: str = "",
+    ) -> str:
+        """
+        用户用手机或相机拍摄了一张现实照片。当用户说 “我拍了一张照片”，“我用手机拍了一张XX”，“我拍了张照” 等时调用此工具。
+        此工具生成的是以用户视角拍摄的真实日常照片，不是AI的自拍。
+        Args:
+            prompt (string): 照片描述，包含场景、主体、构图等。比如 “一只流浪猫在墙头晒太阳”。
+            count (int): 图片数量。默认为 1。
+            aspect_ratio (string): 宽高比例。
+            size (string): 分辨率或尺寸参数。
+            extra_params (string): 附加模型参数，格式为 --key value。
+        """
+        if not self._has_permission(event):
+            return "无权限调用。"
+
+        try:
+            count = self._normalize_count(count)
+            safe_refs = await self._process_and_save_images(self._get_event_images(event))
+
+            # 若有参考图但用户没给 prompt，自动生成一个合理提示
+            if not prompt.strip() and safe_refs:
+                prompt = "a realistic casual mobile photo based on the reference image, natural lighting, everyday scene."
+            elif not prompt.strip():
+                prompt = "a realistic casual mobile phone photo of a daily life scene, natural lighting, relaxed composition."
+
+            # 为“用户拍照”场景强制注入手机摄影风格（不走副脑风格矩阵）
+            style_hint = (
+                "realistic casual mobile phone photo, natural lighting, everyday scene, "
+                "slight hand-held imperfection, deep depth of field, no professional retouching, "
+                "unposed candid moment, believable mobile camera quality."
+            )
+            final_prompt = f"{prompt}, {style_hint}"
+
+            kwargs = {"user_refs": safe_refs} if safe_refs else {}
+            if aspect_ratio:
+                kwargs["aspect_ratio"] = aspect_ratio
+            if size:
+                kwargs["size"] = size
+            kwargs.update(self._parse_extra_params(extra_params))
+
+            async with aiohttp.ClientSession() as session:
+                chain_manager = ChainManager(self.plugin_config, session)
+                tasks = [
+                    chain_manager.run_chain("text2img", final_prompt, **kwargs)
+                    for _ in range(count)
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            valid_urls = [res for res in results if isinstance(res, str) and res]
+            if not valid_urls:
+                raise RuntimeError("所有绘图节点请求失败")
+            sent = await self._send_generated_images(event, valid_urls)
+            return f"系统提示：已为你模拟生成 {sent} 张照片。"
+        except Exception as exc:
+            logger.error(f"[OmniDraw] 用户照片工具失败: {exc}", exc_info=True)
+            return f"系统提示：生成照片失败 ({exc})。"
     @llm_tool(name="generate_selfie")
     async def tool_generate_selfie(
         self,
