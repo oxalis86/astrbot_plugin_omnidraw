@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 PLUGIN_NAME = "astrbot_plugin_omnidraw"
 PLUGIN_AUTHOR = "雪碧bir"
-PLUGIN_VERSION = "3.2.0"
+PLUGIN_VERSION = "3.2.1"
 
 
 @dataclass
