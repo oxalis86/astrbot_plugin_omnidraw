@@ -16,57 +16,71 @@ function showToast(message, type = 'success') {
     setTimeout(() => toast.remove(), 2800);
 }
 
-// ✨ 渲染图库 DOM 骨架
+// ✨ 构建图库 DOM (带骨架屏，原比例)
 async function buildGalleryDOM() {
     const container = document.getElementById('gallery-container');
     if(!container) return;
     
-    container.innerHTML = ''; // 清除旧内容
+    container.innerHTML = ''; 
     
     if(state.gallery.length === 0) {
         container.innerHTML = '<span style="color: var(--text-muted); font-size: 14px; padding: 20px;">图库为空，快去生成第一张照片吧！</span>';
         return;
     }
     
-    // 💡 彻底复用 image-preview，给 img 直接加 border，保证边缘圆滑不被截断，按原比例缩小
+    // 💡 彻底复用参考图的原比例展示逻辑，并加入了骨架屏
     state.gallery.forEach((filename, idx) => {
         const wrapper = document.createElement('div');
         wrapper.className = 'image-preview-wrapper gallery-item-wrapper';
         wrapper.setAttribute('data-file', filename);
         wrapper.style.cursor = 'pointer';
         wrapper.style.position = 'relative';
-        wrapper.style.transition = 'all 0.2s';
+        wrapper.style.transition = 'transform 0.2s';
+        wrapper.style.display = 'inline-block';
+        wrapper.style.margin = '5px';
 
-        // img 直接承载蓝边，确保边框拥有圆角
+        // 骨架屏先显示，img 隐藏。img自带圆角和透明边框
         wrapper.innerHTML = `
-            <img src="" class="image-preview gallery-target-img" id="gallery-img-${idx}" alt="加载中..." 
-                 style="transition: all 0.2s; height: 120px; width: auto; object-fit: contain; border-radius: 12px; border: 2px solid transparent;">
+            <div class="gallery-skeleton" id="skel-${idx}"></div>
+            <img src="" class="image-preview gallery-target-img" id="gallery-img-${idx}" alt="图片" 
+                 style="display: none; height: 140px; width: auto; max-width: 300px; border-radius: 12px; border: 3px solid transparent; transition: all 0.2s ease;">
+            <button class="btn-del-img" data-action="gallery-delete-single" data-file="${filename}" style="display: none; z-index: 20;" id="del-btn-${idx}">×</button>
         `;
         container.appendChild(wrapper);
     });
 
-    // 懒加载图片 Base64
+    // 💡 异步加载 Base64
     for(let idx = 0; idx < state.gallery.length; idx++) {
         const filename = state.gallery[idx];
         try {
             const imgEl = document.getElementById(`gallery-img-${idx}`);
+            const skelEl = document.getElementById(`skel-${idx}`);
+            const btnEl = document.getElementById(`del-btn-${idx}`);
             if(!imgEl) continue;
-            // 获取单张图片使用 GET，因为有 Query Param 最稳妥
-            const url = `get_gallery_image?filename=${encodeURIComponent(filename)}`;
-            const res = await bridge.apiGet(url);
+            
+            // 安全拉取图片
+            const res = await bridge.apiPost("get_gallery_image", { filename: filename });
             if(res && res.base64) {
                 imgEl.setAttribute('src', res.base64);
+                // 加载成功后隐藏骨架，显示原图和删除按钮
+                skelEl.style.display = 'none';
+                imgEl.style.display = 'block';
+                btnEl.style.display = 'flex';
+                
+                // 恢复选中状态
+                if(state.selected_gallery_files.has(filename)) updateGallerySelectionUI();
             }
         } catch(e) {}
     }
 }
 
-// ✨ 无刷新控制选中样式，确保圆滑蓝边和打勾
+// ✨ 更新选中样式：蓝边直接作用于 img 标签，完美圆滑！
 function updateGallerySelectionUI() {
     document.querySelectorAll('.gallery-item-wrapper').forEach(wrapper => {
         const filename = wrapper.getAttribute('data-file');
         const isSelected = state.selected_gallery_files.has(filename);
         const img = wrapper.querySelector('.gallery-target-img');
+        if(!img || img.style.display === 'none') return;
         
         if (isSelected) {
             img.style.border = '3px solid #006FEE';
@@ -80,7 +94,7 @@ function updateGallerySelectionUI() {
                 wrapper.appendChild(check);
             }
         } else {
-            img.style.border = '2px solid transparent';
+            img.style.border = '3px solid transparent';
             img.style.opacity = '1';
             wrapper.style.transform = 'scale(1)';
             const check = wrapper.querySelector('.check-mark');
@@ -89,24 +103,13 @@ function updateGallerySelectionUI() {
     });
 }
 
-// ✨ 带有完整动画的拉取
 async function fetchGallery() {
-    const loading = document.getElementById('gallery-loading');
-    const container = document.getElementById('gallery-container');
-    if(loading) loading.style.display = 'block';
-    if(container) container.style.display = 'none';
-    
     try {
-        const res = await bridge.apiGet("get_gallery_list");
+        const res = await bridge.apiPost("get_gallery_list", {});
         state.gallery = (res && Array.isArray(res.files)) ? res.files : [];
         state.selected_gallery_files.clear();
-        await buildGalleryDOM();
-    } catch(e) { 
-        showToast("读取图库失败", "error"); 
-    } finally {
-        if(loading) loading.style.display = 'none';
-        if(container) container.style.display = 'flex'; // 恢复 multi-upload-container 的 flex 布局
-    }
+        buildGalleryDOM(); 
+    } catch(e) { showToast("读取图库失败", "error"); }
 }
 
 function renderSelectors() {
@@ -217,6 +220,8 @@ async function init() {
     renderVideoProviders();
     setupEventDelegation();
     renderPersonaImages();
+    
+    fetchGallery(); // 拉取图库
 }
 
 function bindBasicFields() {
@@ -369,6 +374,16 @@ function setupEventDelegation() {
         }
     };
 
+    // ✨ 为图库单独写一个动态删除动画，学习人设参考图的优雅退场
+    const animateGalleryDel = (wrapperEl, callback) => {
+        wrapperEl.style.transform = 'scale(0.8)';
+        wrapperEl.style.opacity = '0';
+        setTimeout(() => {
+            wrapperEl.remove();
+            if(callback) callback();
+        }, 200);
+    };
+
     document.body.addEventListener('click', async (e) => {
         const navItem = e.target.closest('.nav-item');
         if (navItem) {
@@ -376,8 +391,6 @@ function setupEventDelegation() {
             navItem.classList.add('active');
             document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
             document.getElementById(navItem.getAttribute('data-target')).classList.add('active');
-            
-            // 只有切换到图库时拉取一次最新数据
             if (navItem.getAttribute('data-target') === 'tab-gallery') fetchGallery();
             return;
         }
@@ -396,7 +409,6 @@ function setupEventDelegation() {
             const sync = apiChip.getAttribute('data-sync');
             const idx = parseInt(apiChip.getAttribute('data-index'), 10);
             const val = apiChip.getAttribute('data-val');
-            
             if (sync === 'prov-api') { state.providers[idx].api_type = val; renderProviders(); } 
             else if (sync === 'vid-api') { state.video_providers[idx].api_type = val; renderVideoProviders(); }
             else if (sync === 'prov-model-select') { state.providers[idx].model = val; renderProviders(); } 
@@ -406,16 +418,16 @@ function setupEventDelegation() {
 
         if (e.target.closest('#persona-upload-trigger')) fileInput.click();
 
-        // ✨ 无刷新处理图库图片的点击选中/取消选中
+        // ✨ 无刷新图库选中逻辑
         const galleryItem = e.target.closest('.gallery-item-wrapper');
-        if (galleryItem) {
+        const delBtn = e.target.closest('.btn-del-img');
+        
+        // 排除掉点到了关闭按钮的情况
+        if (galleryItem && !delBtn) {
             const filename = galleryItem.getAttribute('data-file');
-            if (state.selected_gallery_files.has(filename)) {
-                state.selected_gallery_files.delete(filename);
-            } else {
-                state.selected_gallery_files.add(filename);
-            }
-            updateGallerySelectionUI(); // 仅更新 CSS 样式，绝不重绘导致闪烁
+            if (state.selected_gallery_files.has(filename)) state.selected_gallery_files.delete(filename);
+            else state.selected_gallery_files.add(filename);
+            updateGallerySelectionUI(); 
             return;
         }
 
@@ -426,7 +438,6 @@ function setupEventDelegation() {
 
         if (act === 'save-config') saveConfig(btn);
         
-        // ✨ 图库操作：全选
         if (act === 'gallery-select-all') {
             const allSelected = state.selected_gallery_files.size === state.gallery.length;
             if (allSelected) state.selected_gallery_files.clear();
@@ -434,25 +445,39 @@ function setupEventDelegation() {
             updateGallerySelectionUI();
         }
         
-        // ✨ 图库操作：物理删除，确保使用 POST 以避免参数丢失
+        // ✨ 单个图片右上角的 X 删除（学习人设图机制）
+        if (act === 'gallery-delete-single') {
+            const filename = btn.getAttribute('data-file');
+            const wrapperEl = btn.closest('.gallery-item-wrapper');
+            try {
+                // 💡 暴力修复：将数组拼接成逗号分隔的纯字符串，让 JSON 解析器无懈可击！
+                const res = await bridge.apiPost("delete_gallery_images", { files: filename });
+                if (res && res.success) {
+                    state.selected_gallery_files.delete(filename);
+                    animateGalleryDel(wrapperEl);
+                } else showToast("删除指令未能执行", "error");
+            } catch(err) { showToast("删除异常", "error"); }
+        }
+
+        // ✨ 批量删除
         if (act === 'gallery-delete-selected') {
-            if (state.selected_gallery_files.size === 0) return showToast("请先点击图片选中要删除的文件", "error");
-            if (!confirm(`确定要彻底物理删除这 ${state.selected_gallery_files.size} 张图片吗？该操作不可恢复！`)) return;
+            if (state.selected_gallery_files.size === 0) return showToast("请先点击图片选中！", "error");
+            if (!confirm(`确定要彻底删除这 ${state.selected_gallery_files.size} 张图片吗？`)) return;
             
             btn.disabled = true;
             btn.innerHTML = "删除中...";
             try {
-                const payload = { filenames: Array.from(state.selected_gallery_files) };
-                // 确保使用 apiPost 且参数结构完整
-                const res = await bridge.apiPost("delete_gallery_images", payload);
+                // 💡 暴力修复：将数组拼接成逗号分隔的纯字符串，确保后端能 100% 拿到！
+                const filesString = Array.from(state.selected_gallery_files).join(",");
+                const res = await bridge.apiPost("delete_gallery_images", { files: filesString });
                 if (res && res.success) {
                     showToast(`成功粉碎 ${res.count} 张图片！`);
                     state.selected_gallery_files.clear();
-                    await fetchGallery(); // 重新拉取列表
+                    await fetchGallery(); 
                 } else {
                     showToast("后端返回删除失败", "error");
                 }
-            } catch(err) { showToast("删除通讯异常", "error"); }
+            } catch(err) { showToast("通讯异常", "error"); }
             btn.disabled = false;
             btn.innerHTML = "删除选中";
         }
